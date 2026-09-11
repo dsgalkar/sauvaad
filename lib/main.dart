@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+// ignore: depend_on_referenced_packages
+import 'package:zego_uikit/zego_uikit.dart';
 import 'package:zego_uikit_prebuilt_call/zego_uikit_prebuilt_call.dart';
 import 'constants/app_colors.dart';
 import 'screens/splash_screen.dart';
 
-/// Global navigator key required by ZegoUIKit for overlay / PiP dialogs
+/// Global navigator key required by ZegoUIKit for overlay / incoming call notification dialogs
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
@@ -21,8 +23,11 @@ void main() async {
     ),
   );
 
-  // Initialize ZegoUIKit navigation key
+  // Initialize ZegoUIKit navigation key for incoming call popups
   ZegoUIKitPrebuiltCallInvitationService().setNavigatorKey(navigatorKey);
+
+  // Initialize log
+  await ZegoUIKit().initLog();
 
   runApp(const SauvaadApp());
 }

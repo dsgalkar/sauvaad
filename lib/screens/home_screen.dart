@@ -1,15 +1,13 @@
-import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:permission_handler/permission_handler.dart';
+// ignore: depend_on_referenced_packages
+import 'package:zego_uikit/zego_uikit.dart';
+import 'package:zego_uikit_prebuilt_call/zego_uikit_prebuilt_call.dart';
 import '../constants/app_colors.dart';
-import '../constants/zego_config.dart';
 import '../models/user_model.dart';
+import '../services/call_invitation_service.dart';
 import '../widgets/glass_card.dart';
-import '../widgets/gradient_button.dart';
-import 'call_screen.dart';
 import 'login_screen.dart';
-import 'settings_dialog.dart';
 
 class HomeScreen extends StatefulWidget {
   final UserModel user;
@@ -20,11 +18,10 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
-  final _callIdController = TextEditingController();
-  bool _isVideoCall = true;
-  bool _isGroupCall = false;
-  bool _isJoining = false;
+class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
+  final _targetUserIdController = TextEditingController();
+  late AnimationController _pulseController;
+  late Animation<double> _pulseAnimation;
 
   final List<IconData> _avatars = const [
     Icons.person_rounded,
@@ -37,114 +34,97 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    _generateRandomCallId();
-  }
-
-  void _generateRandomCallId() {
-    final random = Random();
-    final number = 1000 + random.nextInt(9000);
-    setState(() {
-      _callIdController.text = 'room_$number';
+    _targetUserIdController.addListener(() {
+      setState(() {});
     });
+
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1600),
+    )..repeat(reverse: true);
+
+    _pulseAnimation = Tween<double>(begin: 0.85, end: 1.25).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
   }
 
   @override
   void dispose() {
-    _callIdController.dispose();
+    _targetUserIdController.dispose();
+    _pulseController.dispose();
     super.dispose();
   }
 
-  Future<void> _pasteFromClipboard() async {
+  Future<void> _pasteTargetUserId() async {
     final data = await Clipboard.getData('text/plain');
     if (data?.text != null && data!.text!.trim().isNotEmpty) {
+      final sanitized = data.text!.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '');
       setState(() {
-        _callIdController.text = data.text!.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '');
+        _targetUserIdController.text = sanitized;
       });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: AppColors.surfaceElevated,
+            duration: const Duration(seconds: 1),
+            content: Text('Pasted User ID: $sanitized'),
+          ),
+        );
+      }
     }
   }
 
-  Future<void> _startOrJoinCall() async {
-    final callId = _callIdController.text.trim();
-    if (callId.isEmpty) {
+  void _copyOwnUserId() {
+    Clipboard.setData(ClipboardData(text: widget.user.id));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        backgroundColor: AppColors.surfaceElevated,
+        duration: const Duration(seconds: 2),
+        content: Row(
+          children: [
+            const Icon(Icons.check_circle_rounded, color: AppColors.callGreen, size: 18),
+            const SizedBox(width: 8),
+            Text('Copied your ID (${widget.user.id}) to clipboard!'),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<bool> _validateCall(bool isVideo) async {
+    final targetId = _targetUserIdController.text.trim();
+    if (targetId.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           backgroundColor: AppColors.callRed,
-          content: Text('Please enter or generate a Call ID'),
+          content: Text('Please enter the target User ID to call.'),
         ),
       );
-      return;
+      return false;
     }
 
-    setState(() => _isJoining = true);
-
-    // Request necessary runtime permissions
-    final micStatus = await Permission.microphone.request();
-    if (_isVideoCall) {
-      final cameraStatus = await Permission.camera.request();
-      if (cameraStatus.isPermanentlyDenied || micStatus.isPermanentlyDenied) {
-        setState(() => _isJoining = false);
-        _showPermissionDialog();
-        return;
-      }
-    } else {
-      if (micStatus.isPermanentlyDenied) {
-        setState(() => _isJoining = false);
-        _showPermissionDialog();
-        return;
-      }
+    if (targetId == widget.user.id) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          backgroundColor: AppColors.callRed,
+          content: Text('You cannot call your own User ID.'),
+        ),
+      );
+      return false;
     }
 
-    setState(() => _isJoining = false);
-
-    if (!mounted) return;
-
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => CallScreen(
-          callID: callId,
-          userID: widget.user.id,
-          userName: widget.user.name,
-          isVideoCall: _isVideoCall,
-          isGroupCall: _isGroupCall,
-        ),
-      ),
-    );
+    return true;
   }
 
-  void _showPermissionDialog() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.surface,
-        title: const Text('Permissions Required', style: TextStyle(color: Colors.white)),
-        content: const Text(
-          'Microphone and Camera permissions are needed to start calls. Please enable them in app settings.',
-          style: TextStyle(color: AppColors.textSecondary),
+  void _onCallResult(String code, String message, List<String> errorInvitees) {
+    if (errorInvitees.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: AppColors.callRed,
+          content: Text('User ${errorInvitees.join(", ")} is currently unavailable.'),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel', style: TextStyle(color: AppColors.textMuted)),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: AppColors.cyan),
-            onPressed: () {
-              Navigator.pop(ctx);
-              openAppSettings();
-            },
-            child: const Text('Open Settings', style: TextStyle(color: Colors.black)),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _openSettings() async {
-    await showDialog(
-      context: context,
-      builder: (_) => const SettingsDialog(),
-    );
-    setState(() {}); // Refresh credential state
+      );
+    }
   }
 
   Future<void> _handleLogout() async {
@@ -152,9 +132,9 @@ class _HomeScreenState extends State<HomeScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: AppColors.surface,
-        title: const Text('Switch User', style: TextStyle(color: Colors.white)),
+        title: const Text('Switch Caller Profile', style: TextStyle(color: Colors.white)),
         content: const Text(
-          'Do you want to log out and change caller profile?',
+          'Do you want to sign out of this device?',
           style: TextStyle(color: AppColors.textSecondary),
         ),
         actions: [
@@ -165,13 +145,14 @@ class _HomeScreenState extends State<HomeScreen> {
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: AppColors.callRed),
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Log Out', style: TextStyle(color: Colors.white)),
+            child: const Text('Sign Out', style: TextStyle(color: Colors.white)),
           ),
         ],
       ),
     );
 
     if (confirm == true) {
+      await CallInvitationService.instance.uninitCallInvitation();
       await UserModel.clear();
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
@@ -182,10 +163,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final isCustomConfig = ZegoConfig.isCustomConfigured;
     final avatarIcon = _avatars[
       widget.user.avatarIndex.clamp(0, _avatars.length - 1)
     ];
+    final targetId = _targetUserIdController.text.trim();
+    final inviteesList = targetId.isNotEmpty
+        ? [ZegoUIKitUser(id: targetId, name: targetId)]
+        : <ZegoUIKitUser>[];
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -195,308 +179,330 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Top Bar
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  // Brand Logo & Title
-                  Row(
-                    children: [
-                      Container(
-                        width: 44,
-                        height: 44,
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: AppColors.cyan.withValues(alpha: 0.5),
-                            width: 1.2,
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: AppColors.cyan.withValues(alpha: 0.2),
-                              blurRadius: 10,
-                              offset: const Offset(0, 2),
-                            ),
-                          ],
-                        ),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: Image.asset(
-                            'assets/images/logo.png',
-                            fit: BoxFit.cover,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'Sauvaad',
-                            style: TextStyle(
-                              color: AppColors.textPrimary,
-                              fontSize: 19,
-                              fontWeight: FontWeight.bold,
-                              letterSpacing: 0.4,
-                            ),
-                          ),
-                          Text(
-                            'Audio & Video Calling',
-                            style: TextStyle(
-                              color: AppColors.cyan.withValues(alpha: 0.85),
-                              fontSize: 11,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
+              // Top Bar: Branding & Profile with Dynamic Character Adaptation
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final totalWidth = constraints.maxWidth;
+                  // Dynamically allocate characters based on available container width:
+                  final int maxNameChars = totalWidth <= 300
+                      ? 4
+                      : (totalWidth <= 340
+                          ? 6
+                          : (totalWidth <= 380
+                              ? 9
+                              : (totalWidth <= 420 ? 12 : 16)));
 
-                  // Actions: Settings & Profile
-                  Row(
+                  final displayName = widget.user.name.length > maxNameChars
+                      ? '${widget.user.name.substring(0, maxNameChars)}…'
+                      : widget.user.name;
+
+                  return Row(
                     children: [
-                      // Settings Button with Config indicator
-                      IconButton(
-                        onPressed: _openSettings,
-                        tooltip: 'ZEGOCLOUD Settings',
-                        icon: Stack(
-                          clipBehavior: Clip.none,
+                      // App Branding
+                      Expanded(
+                        child: Row(
                           children: [
                             Container(
-                              padding: const EdgeInsets.all(8),
+                              width: 40,
+                              height: 40,
                               decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: AppColors.surfaceElevated,
+                                borderRadius: BorderRadius.circular(12),
                                 border: Border.all(
-                                  color: AppColors.surfaceBorder,
+                                  color: AppColors.cyan.withValues(alpha: 0.5),
+                                  width: 1.2,
                                 ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: AppColors.cyan.withValues(alpha: 0.2),
+                                    blurRadius: 10,
+                                    offset: const Offset(0, 2),
+                                  ),
+                                ],
                               ),
-                              child: const Icon(
-                                Icons.tune_rounded,
-                                color: AppColors.textSecondary,
-                                size: 20,
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(12),
+                                child: Image.asset(
+                                  'assets/images/logo.png',
+                                  fit: BoxFit.cover,
+                                ),
                               ),
                             ),
-                            Positioned(
-                              top: -2,
-                              right: -2,
-                              child: Container(
-                                width: 10,
-                                height: 10,
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  color: isCustomConfig
-                                      ? AppColors.callGreen
-                                      : AppColors.warning,
-                                  border: Border.all(
-                                    color: AppColors.background,
-                                    width: 1.5,
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Text(
+                                    'Sauvaad',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      color: AppColors.textPrimary,
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.bold,
+                                      letterSpacing: 0.3,
+                                    ),
                                   ),
-                                ),
+                                  Text(
+                                    'Audio & Video Calls',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      color: AppColors.cyan.withValues(alpha: 0.85),
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
                           ],
                         ),
                       ),
-                      const SizedBox(width: 6),
-                      // User profile button
+
+                      const SizedBox(width: 8),
+
+                      // User Profile Pill (Tap to switch user / logout) with auto-scaling
                       GestureDetector(
                         onTap: _handleLogout,
                         child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 6,
+                          constraints: BoxConstraints(
+                            maxWidth: totalWidth * 0.44,
                           ),
+                          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
                           decoration: BoxDecoration(
                             color: AppColors.surfaceElevated,
                             borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                              color: AppColors.surfaceBorder,
-                            ),
+                            border: Border.all(color: AppColors.surfaceBorder),
                           ),
                           child: Row(
+                            mainAxisSize: MainAxisSize.min,
                             children: [
                               CircleAvatar(
-                                radius: 12,
+                                radius: 11,
                                 backgroundColor: AppColors.cyan.withValues(alpha: 0.2),
-                                child: Icon(
-                                  avatarIcon,
-                                  size: 14,
-                                  color: AppColors.cyan,
+                                child: Icon(avatarIcon, size: 13, color: AppColors.cyan),
+                              ),
+                              const SizedBox(width: 5),
+                              Flexible(
+                                child: Text(
+                                  displayName,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  softWrap: false,
+                                  style: const TextStyle(
+                                    color: AppColors.textPrimary,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                  ),
                                 ),
                               ),
-                              const SizedBox(width: 6),
-                              Text(
-                                widget.user.name,
-                                style: const TextStyle(
-                                  color: AppColors.textPrimary,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
+                              const SizedBox(width: 4),
+                              const Icon(Icons.logout_rounded, size: 13, color: AppColors.textMuted),
                             ],
                           ),
                         ),
                       ),
                     ],
-                  ),
-                ],
+                  );
+                },
               ),
 
-              const SizedBox(height: 24),
+              const SizedBox(height: 20),
 
-              // ZegoCloud Notice banner (if default keys are active)
-              if (!isCustomConfig)
-                Container(
-                  margin: const EdgeInsets.only(bottom: 20),
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: AppColors.surfaceElevated.withValues(alpha: 0.8),
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: AppColors.cyan.withValues(alpha: 0.3),
-                    ),
-                  ),
-                  child: Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: AppColors.cyan.withValues(alpha: 0.12),
-                          shape: BoxShape.circle,
-                        ),
-                        child: const Icon(
-                          Icons.info_outline_rounded,
-                          color: AppColors.cyan,
-                          size: 20,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              'Live Calling Setup',
-                              style: TextStyle(
-                                color: AppColors.textPrimary,
-                                fontSize: 13,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              'Running with demo keys. Set your free AppID & AppSign from ZEGOCLOUD Console to connect real devices.',
-                              style: TextStyle(
-                                color: AppColors.textSecondary.withValues(alpha: 0.85),
-                                fontSize: 11,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      TextButton(
-                        onPressed: _openSettings,
-                        child: const Text(
-                          'Configure',
-                          style: TextStyle(
-                            color: AppColors.cyan,
-                            fontSize: 12,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-
-              // Main Call Configuration Card
+              // "Your Caller ID" Identity Card
               GlassCard(
                 hasGlow: true,
-                padding: const EdgeInsets.all(22),
+                padding: const EdgeInsets.all(18),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Header inside card
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        const Text(
-                          'Enter Call Room',
-                          style: TextStyle(
-                            color: AppColors.textPrimary,
-                            fontSize: 17,
-                            fontWeight: FontWeight.bold,
+                        Expanded(
+                          child: Row(
+                            children: [
+                              ScaleTransition(
+                                scale: _pulseAnimation,
+                                child: Container(
+                                  width: 9,
+                                  height: 9,
+                                  decoration: const BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: AppColors.callGreen,
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: AppColors.callGreen,
+                                        blurRadius: 8,
+                                        spreadRadius: 1,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              const Flexible(
+                                child: Text(
+                                  'Online • Ready to Call',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: AppColors.callGreen,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: 0.3,
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                        Row(
-                          children: [
-                            IconButton(
-                              onPressed: _pasteFromClipboard,
-                              tooltip: 'Paste Call ID',
-                              icon: const Icon(
-                                Icons.content_paste_rounded,
-                                color: AppColors.cyan,
-                                size: 18,
+                        const SizedBox(width: 8),
+                        InkWell(
+                          onTap: _copyOwnUserId,
+                          borderRadius: BorderRadius.circular(8),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: AppColors.cyan.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                color: AppColors.cyan.withValues(alpha: 0.4),
                               ),
-                              constraints: const BoxConstraints(),
-                              padding: const EdgeInsets.all(6),
                             ),
-                            const SizedBox(width: 6),
-                            IconButton(
-                              onPressed: _generateRandomCallId,
-                              tooltip: 'Generate Random ID',
-                              icon: const Icon(
-                                Icons.refresh_rounded,
-                                color: AppColors.violet,
-                                size: 18,
-                              ),
-                              constraints: const BoxConstraints(),
-                              padding: const EdgeInsets.all(6),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.copy_rounded, color: AppColors.cyan, size: 13),
+                                const SizedBox(width: 4),
+                                Text(
+                                  MediaQuery.sizeOf(context).width <= 340 ? 'Copy' : 'Copy ID',
+                                  style: const TextStyle(
+                                    color: AppColors.cyan,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
                             ),
-                          ],
+                          ),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 10),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Your Caller ID',
+                      style: TextStyle(
+                        color: AppColors.textMuted,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: AppColors.backgroundAlt,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: AppColors.surfaceBorder),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Expanded(
+                            child: Text(
+                              widget.user.id,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: AppColors.textPrimary,
+                                fontFamily: 'monospace',
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                                letterSpacing: 0.8,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          const Icon(
+                            Icons.fingerprint_rounded,
+                            color: AppColors.cyan,
+                            size: 20,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Share this ID with friends so they can call you directly from their device.',
+                      style: TextStyle(
+                        color: AppColors.textSecondary.withValues(alpha: 0.85),
+                        fontSize: 11.5,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
 
-                    // Call ID Text Input
+              const SizedBox(height: 20),
+
+              // "Call a Contact" Calling Action Card
+              GlassCard(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Make a Call',
+                      style: TextStyle(
+                        color: AppColors.textPrimary,
+                        fontSize: 17,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    const Text(
+                      'Enter the target User ID to send an instant ringing call request.',
+                      style: TextStyle(
+                        color: AppColors.textMuted,
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+
+                    // Target User ID Input
                     TextFormField(
-                      controller: _callIdController,
+                      controller: _targetUserIdController,
                       style: const TextStyle(
                         color: AppColors.textPrimary,
-                        fontSize: 16,
                         fontFamily: 'monospace',
+                        fontSize: 16,
                         fontWeight: FontWeight.w600,
                       ),
                       decoration: InputDecoration(
-                        hintText: 'e.g. room_1234',
+                        hintText: 'e.g. user_5432',
                         hintStyle: const TextStyle(color: AppColors.textMuted),
                         prefixIcon: const Icon(
-                          Icons.meeting_room_rounded,
+                          Icons.perm_identity_rounded,
                           color: AppColors.cyan,
                         ),
-                        suffixIcon: IconButton(
-                          icon: const Icon(
-                            Icons.copy_rounded,
-                            color: AppColors.textMuted,
-                            size: 18,
-                          ),
-                          onPressed: () {
-                            if (_callIdController.text.isNotEmpty) {
-                              Clipboard.setData(
-                                ClipboardData(text: _callIdController.text),
-                              );
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  duration: Duration(seconds: 1),
-                                  backgroundColor: AppColors.surfaceElevated,
-                                  content: Text('Call ID copied to clipboard!'),
-                                ),
-                              );
-                            }
-                          },
+                        suffixIcon: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (_targetUserIdController.text.isNotEmpty)
+                              IconButton(
+                                icon: const Icon(Icons.clear_rounded, color: AppColors.textMuted, size: 18),
+                                onPressed: () => setState(() => _targetUserIdController.clear()),
+                              ),
+                            IconButton(
+                              icon: const Icon(Icons.paste_rounded, color: AppColors.cyan, size: 18),
+                              tooltip: 'Paste from clipboard',
+                              onPressed: _pasteTargetUserId,
+                            ),
+                          ],
                         ),
                         filled: true,
                         fillColor: AppColors.backgroundAlt,
@@ -510,212 +516,106 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                         focusedBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(14),
-                          borderSide: const BorderSide(
-                            color: AppColors.cyan,
-                            width: 1.5,
-                          ),
+                          borderSide: const BorderSide(color: AppColors.cyan, width: 1.5),
                         ),
                       ),
                     ),
-                    const SizedBox(height: 22),
 
-                    // Call Mode Selector (Video Call vs Audio-only)
+                    const SizedBox(height: 20),
+
+                    // Call Invitation Buttons (Video & Voice)
                     const Text(
-                      'Select Call Mode',
+                      'Select Call Type',
                       style: TextStyle(
                         color: AppColors.textSecondary,
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
-                        letterSpacing: 0.5,
                       ),
                     ),
                     const SizedBox(height: 10),
+
                     Row(
                       children: [
-                        // Video Call Option
+                        // Video Call Button
                         Expanded(
-                          child: GestureDetector(
-                            onTap: () => setState(() => _isVideoCall = true),
-                            child: AnimatedContainer(
-                              duration: const Duration(milliseconds: 200),
-                              padding: const EdgeInsets.symmetric(vertical: 14),
-                              decoration: BoxDecoration(
-                                borderRadius: BorderRadius.circular(14),
-                                gradient: _isVideoCall
-                                    ? AppColors.accentGradient
-                                    : null,
-                                color: _isVideoCall
-                                    ? null
-                                    : AppColors.surfaceElevated,
-                                border: Border.all(
-                                  color: _isVideoCall
-                                      ? Colors.transparent
-                                      : AppColors.surfaceBorder,
+                          child: Container(
+                            height: 62,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(14),
+                              gradient: AppColors.accentGradient,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: AppColors.cyan.withValues(alpha: 0.3),
+                                  blurRadius: 12,
+                                  offset: const Offset(0, 4),
                                 ),
-                                boxShadow: _isVideoCall
-                                    ? [
-                                        BoxShadow(
-                                          color: AppColors.cyan.withValues(alpha: 0.3),
-                                          blurRadius: 14,
-                                          offset: const Offset(0, 4),
-                                        ),
-                                      ]
-                                    : null,
+                              ],
+                            ),
+                            child: ZegoSendCallInvitationButton(
+                              isVideoCall: true,
+                              resourceID: 'sauvaad_call',
+                              invitees: inviteesList,
+                              icon: ButtonIcon(
+                                icon: const Icon(Icons.videocam_rounded, color: Colors.black, size: 20),
                               ),
-                              child: Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(
-                                    Icons.videocam_rounded,
-                                    color: _isVideoCall
-                                        ? Colors.white
-                                        : AppColors.textMuted,
-                                    size: 20,
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Text(
-                                    'Video Call',
-                                    style: TextStyle(
-                                      color: _isVideoCall
-                                          ? Colors.white
-                                          : AppColors.textSecondary,
-                                      fontWeight: FontWeight.w600,
-                                      fontSize: 14,
-                                    ),
-                                  ),
-                                ],
+                              text: MediaQuery.sizeOf(context).width <= 330 ? 'Video' : 'Video Call',
+                              textStyle: const TextStyle(
+                                color: Colors.black,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
                               ),
+                              iconSize: const Size(20, 20),
+                              buttonSize: const Size(double.infinity, 62),
+                              borderRadius: 14,
+                              clickableBackgroundColor: Colors.transparent,
+                              unclickableBackgroundColor: Colors.transparent,
+                              onWillPressed: () => _validateCall(true),
+                              onPressed: _onCallResult,
                             ),
                           ),
                         ),
+
                         const SizedBox(width: 12),
-                        // Voice / Audio Call Option
+
+                        // Voice Call Button
                         Expanded(
-                          child: GestureDetector(
-                            onTap: () => setState(() => _isVideoCall = false),
-                            child: AnimatedContainer(
-                              duration: const Duration(milliseconds: 200),
-                              padding: const EdgeInsets.symmetric(vertical: 14),
-                              decoration: BoxDecoration(
-                                borderRadius: BorderRadius.circular(14),
-                                gradient: !_isVideoCall
-                                    ? AppColors.primaryGradient
-                                    : null,
-                                color: !_isVideoCall
-                                    ? null
-                                    : AppColors.surfaceElevated,
-                                border: Border.all(
-                                  color: !_isVideoCall
-                                      ? Colors.transparent
-                                      : AppColors.surfaceBorder,
+                          child: Container(
+                            height: 62,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(14),
+                              gradient: AppColors.primaryGradient,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: AppColors.purple.withValues(alpha: 0.35),
+                                  blurRadius: 12,
+                                  offset: const Offset(0, 4),
                                 ),
-                                boxShadow: !_isVideoCall
-                                    ? [
-                                        BoxShadow(
-                                          color: AppColors.purple.withValues(alpha: 0.3),
-                                          blurRadius: 14,
-                                          offset: const Offset(0, 4),
-                                        ),
-                                      ]
-                                    : null,
+                              ],
+                            ),
+                            child: ZegoSendCallInvitationButton(
+                              isVideoCall: false,
+                              resourceID: 'sauvaad_call',
+                              invitees: inviteesList,
+                              icon: ButtonIcon(
+                                icon: const Icon(Icons.call_rounded, color: Colors.white, size: 20),
                               ),
-                              child: Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(
-                                    Icons.mic_rounded,
-                                    color: !_isVideoCall
-                                        ? Colors.white
-                                        : AppColors.textMuted,
-                                    size: 20,
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Text(
-                                    'Voice Call',
-                                    style: TextStyle(
-                                      color: !_isVideoCall
-                                          ? Colors.white
-                                          : AppColors.textSecondary,
-                                      fontWeight: FontWeight.w600,
-                                      fontSize: 14,
-                                    ),
-                                  ),
-                                ],
+                              text: MediaQuery.sizeOf(context).width <= 330 ? 'Voice' : 'Voice Call',
+                              textStyle: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
                               ),
+                              iconSize: const Size(20, 20),
+                              buttonSize: const Size(double.infinity, 62),
+                              borderRadius: 14,
+                              clickableBackgroundColor: Colors.transparent,
+                              unclickableBackgroundColor: Colors.transparent,
+                              onWillPressed: () => _validateCall(false),
+                              onPressed: _onCallResult,
                             ),
                           ),
                         ),
                       ],
-                    ),
-                    const SizedBox(height: 18),
-
-                    // Call Type: 1-on-1 vs Group Call Switch
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text(
-                          'Call Layout',
-                          style: TextStyle(
-                            color: AppColors.textSecondary,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        Row(
-                          children: [
-                            ChoiceChip(
-                              label: const Text('1-on-1'),
-                              selected: !_isGroupCall,
-                              onSelected: (val) => setState(() => _isGroupCall = false),
-                              backgroundColor: AppColors.surfaceElevated,
-                              selectedColor: AppColors.cyan.withValues(alpha: 0.25),
-                              labelStyle: TextStyle(
-                                color: !_isGroupCall
-                                    ? AppColors.cyan
-                                    : AppColors.textMuted,
-                                fontWeight: FontWeight.w600,
-                                fontSize: 12,
-                              ),
-                              side: BorderSide(
-                                color: !_isGroupCall
-                                    ? AppColors.cyan
-                                    : AppColors.surfaceBorder,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            ChoiceChip(
-                              label: const Text('Group'),
-                              selected: _isGroupCall,
-                              onSelected: (val) => setState(() => _isGroupCall = true),
-                              backgroundColor: AppColors.surfaceElevated,
-                              selectedColor: AppColors.violet.withValues(alpha: 0.25),
-                              labelStyle: TextStyle(
-                                color: _isGroupCall
-                                    ? AppColors.violet
-                                    : AppColors.textMuted,
-                                fontWeight: FontWeight.w600,
-                                fontSize: 12,
-                              ),
-                              side: BorderSide(
-                                color: _isGroupCall
-                                    ? AppColors.violet
-                                    : AppColors.surfaceBorder,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 24),
-
-                    // Start/Join Call Button
-                    GradientButton(
-                      onPressed: _startOrJoinCall,
-                      isLoading: _isJoining,
-                      text: _isVideoCall ? 'Start Video Call' : 'Start Voice Call',
-                      icon: _isVideoCall
-                          ? Icons.videocam_rounded
-                          : Icons.call_rounded,
                     ),
                   ],
                 ),
@@ -723,14 +623,14 @@ class _HomeScreenState extends State<HomeScreen> {
 
               const SizedBox(height: 24),
 
-              // Quick Feature Highlights
+              // Calling Features Guide
               const Text(
-                'Key Features',
+                'How It Works',
                 style: TextStyle(
                   color: AppColors.textSecondary,
                   fontSize: 14,
                   fontWeight: FontWeight.bold,
-                  letterSpacing: 0.5,
+                  letterSpacing: 0.4,
                 ),
               ),
               const SizedBox(height: 12),
@@ -738,19 +638,19 @@ class _HomeScreenState extends State<HomeScreen> {
               Row(
                 children: [
                   Expanded(
-                    child: _buildFeatureCard(
-                      icon: Icons.high_quality_rounded,
-                      title: 'Crystal Clear',
-                      subtitle: 'Ultra-HD audio & 1080p video',
+                    child: _buildInfoCard(
+                      icon: Icons.notifications_active_rounded,
+                      title: 'Instant Ringing',
+                      subtitle: 'Incoming call dialog alerts the user directly',
                       color: AppColors.cyan,
                     ),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
-                    child: _buildFeatureCard(
-                      icon: Icons.security_rounded,
-                      title: 'Secure & Private',
-                      subtitle: 'Encrypted WebRTC channels',
+                    child: _buildInfoCard(
+                      icon: Icons.lock_rounded,
+                      title: 'Direct & Private',
+                      subtitle: 'Encrypted 1-to-1 WebRTC connection',
                       color: AppColors.violet,
                     ),
                   ),
@@ -760,58 +660,25 @@ class _HomeScreenState extends State<HomeScreen> {
               Row(
                 children: [
                   Expanded(
-                    child: _buildFeatureCard(
-                      icon: Icons.groups_rounded,
-                      title: 'Group Calling',
-                      subtitle: 'Multi-party rooms supported',
+                    child: _buildInfoCard(
+                      icon: Icons.high_quality_rounded,
+                      title: 'HD Quality',
+                      subtitle: '1080p video with low-latency audio',
                       color: AppColors.indigo,
                     ),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
-                    child: _buildFeatureCard(
+                    child: _buildInfoCard(
                       icon: Icons.picture_in_picture_alt_rounded,
-                      title: 'PiP Overlay',
-                      subtitle: 'Multitask while talking',
+                      title: 'Background PiP',
+                      subtitle: 'Multitask smoothly while in a call',
                       color: AppColors.magenta,
                     ),
                   ),
                 ],
               ),
-
-              const SizedBox(height: 28),
-
-              // Caller ID info pill
-              Center(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: AppColors.surface,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: AppColors.surfaceBorder),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(
-                        Icons.fingerprint_rounded,
-                        color: AppColors.cyan,
-                        size: 16,
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        'Your Caller ID: ${widget.user.id}',
-                        style: const TextStyle(
-                          color: AppColors.textSecondary,
-                          fontSize: 12,
-                          fontFamily: 'monospace',
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 20),
             ],
           ),
         ),
@@ -819,7 +686,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildFeatureCard({
+  Widget _buildInfoCard({
     required IconData icon,
     required String title,
     required String subtitle,
@@ -833,7 +700,7 @@ class _HomeScreenState extends State<HomeScreen> {
           Container(
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.14),
+              color: color.withValues(alpha: 0.15),
               borderRadius: BorderRadius.circular(10),
             ),
             child: Icon(icon, color: color, size: 20),

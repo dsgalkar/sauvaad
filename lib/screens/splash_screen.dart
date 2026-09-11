@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../constants/app_colors.dart';
 import '../constants/zego_config.dart';
 import '../models/user_model.dart';
+import '../services/call_invitation_service.dart';
 import 'home_screen.dart';
 import 'login_screen.dart';
 
@@ -44,12 +45,17 @@ class _SplashScreenState extends State<SplashScreen>
   }
 
   Future<void> _initializeApp() async {
-    // Initialize Zego credentials and user state
+    // Initialize user state
     await ZegoConfig.init();
     final user = await UserModel.load();
 
+    if (user != null) {
+      // Connect to ZEGOCLOUD Call Invitation service so incoming calls ring this device
+      await CallInvitationService.instance.initCallInvitation(user);
+    }
+
     // Give the splash animation time to present smoothly
-    await Future.delayed(const Duration(milliseconds: 2200));
+    await Future.delayed(const Duration(milliseconds: 2000));
 
     if (!mounted) return;
 

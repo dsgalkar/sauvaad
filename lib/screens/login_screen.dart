@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../constants/app_colors.dart';
 import '../models/user_model.dart';
+import '../services/call_invitation_service.dart';
 import '../widgets/glass_card.dart';
 import '../widgets/gradient_button.dart';
 import 'home_screen.dart';
@@ -58,6 +59,9 @@ class _LoginScreenState extends State<LoginScreen> {
     );
 
     await user.save();
+
+    // Connect to ZEGOCLOUD Call Invitation service for this user ID
+    await CallInvitationService.instance.initCallInvitation(user);
 
     if (!mounted) return;
     setState(() => _isLoading = false);
